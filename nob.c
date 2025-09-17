@@ -36,10 +36,12 @@ int main(int argc, char **argv) {
 #ifdef _MSC_VER
     const char* obj_path = nob_temp_sprintf(BUILD_DIR "%s.obj", *s);
     nob_cmd_append(&cmd,"/nologo");
+    nob_cmd_append(&cmd,"/W4");
     nob_cmd_append(&cmd,nob_temp_sprintf("/Fo:%s", obj_path));
     nob_cmd_append(&cmd,"/c");
     nob_cmd_append(&cmd, nob_temp_sprintf(SRC_DIR "%s", *s));
     nob_da_append(&objects, obj_path);
+    nob_cmd_append(&cmd,"/DLOG_NOCOLOR");
 #endif
     if (!nob_cmd_run(&cmd, .async = &procs)) return 1;
   }
