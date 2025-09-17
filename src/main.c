@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,10 +13,20 @@
 #include "logging.h"
 
 typedef struct {
+  int y;
+  int m;
+  int d;
+  int hh;
+  int mm;
+  int ss;
+  char tz;
+} timestamp_t;
+
+typedef struct {
   size_t dtstamp;
   const char* uid;
-  size_t dtstart;
-  size_t dtend;
+  timestamp_t dtstart;
+  timestamp_t dtend;
   const char* cat;
   const char* summary;
   const char* location;
@@ -64,6 +75,22 @@ void split(slice_t* s, const char* sep, unsigned int limit, slicearr_t* sa) {
   da_append(sa, ((slice_t){ .data = s->data + start, .size = s->size - start }));
 }
 
+int sized_atoi(const char* data, size_t size) {
+  int n = 0;
+  int sign = 1;
+  if (size == 0) return 0;
+  for (size_t i=0; i < size; i++, data++) {
+    if (i==0 && *data == '-') { sign = -1; continue; }
+    if (!isdigit(*data)) return 0;
+    n = (n * 10) + (*data - '0');
+  }
+  return n * sign;
+}
+
+int slice_atoi(slice_t *s) {
+  return sized_atoi(s->data, s->size);
+}
+
 #define slice_starts_with(s, str) \
   (strlen(str) <= s->size && memcmp(s->data, str, strlen(str)) == 0)
 
@@ -81,6 +108,7 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
   for (size_t i = 0; i < lines.count; i++, key_value.count = 0) {
   // for (size_t i = 0; i < 25; i++, key_value.count = 0) {
     split(lines.items + i, ":", 1, &key_value);
+    char tz;
     slice_t key = key_value.items[0];
     slice_t value = key_value.items[1];
     // LOG_DEBUG("-%.*s -> %.*s-", SLICE_FMT(key), SLICE_FMT(value));
@@ -112,6 +140,34 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
         return -1;
       }
       e.summary = arena_sprintf(arena, "%.*s", SLICE_FMT(value));
+    } else if (memcmp(key.data, "DTSTART", key.size) == 0) {
+      // LOG_DEBUG("SUMMARY");
+      if (state != STATE_EVENT) {
+        LOG_ERROR("Start time outside of event.");
+        return -1;
+      }
+      e.dtstart = (timestamp_t){
+        .y  = sized_atoi(value.data,      4),
+        .m  = sized_atoi(value.data + 4,  2),
+        .d  = sized_atoi(value.data + 6,  2),
+        .hh = sized_atoi(value.data + 9,  2),
+        .mm = sized_atoi(value.data + 11, 2),
+        .ss = sized_atoi(value.data + 13, 2),
+      };
+    } else if (memcmp(key.data, "DTEND", key.size) == 0) {
+      // LOG_DEBUG("SUMMARY");
+      if (state != STATE_EVENT) {
+        LOG_ERROR("End time outside of event.");
+        return -1;
+      }
+      e.dtend = (timestamp_t){
+        .y  = sized_atoi(value.data,      4),
+        .m  = sized_atoi(value.data + 4,  2),
+        .d  = sized_atoi(value.data + 6,  2),
+        .hh = sized_atoi(value.data + 9,  2),
+        .mm = sized_atoi(value.data + 11, 2),
+        .ss = sized_atoi(value.data + 13, 2),
+      };
     }
   }
 
@@ -131,9 +187,18 @@ int main(int argc, char **argv) {
 
   parse_calendar(&arena, &cal_file, &calendar);
 
+  // TODO: now store timestamps in uin64_t, lin search (for now) array for
+  // dtstart < tomorrw@00 && dtend > today@00. store indexes of found elements
+  // in final array (or store events directly idk) to be displayed.
+
   LOG_INFO("%zu events.", calendar.events.count);
   da_foreach(event_t, e, &calendar.events) {
-    LOG_INFO("%s", e->summary);
+    LOG_INFO(
+      "[%d/%02d/%02d %02d:%02d:%02d - %d/%02d/%02d %02d:%02d:%02d]\t%s",
+      e->dtstart.y, e->dtstart.m, e->dtstart.d, e->dtstart.hh, e->dtstart.mm, e->dtstart.ss,
+      e->dtend.y, e->dtend.m, e->dtend.d, e->dtend.hh, e->dtend.mm, e->dtend.ss,
+      e->summary
+    );
   }
  
   LOG_INFO("Done");
