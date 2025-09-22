@@ -7,6 +7,8 @@
 #ifdef _WIN32
 #define WIN32_MEAN_AND_LEAN
 #include <windows.h>
+
+#define TO_SECS(x) (x) / ( 1000 * 1000 * 10 )
 #endif
 
 #define SB_IMPLEMENTATION
@@ -259,10 +261,11 @@ int64_t timestamp_cmp(timestamp_t a, timestamp_t b) {
 #endif
 }
 
-int main(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
+int qsort_event_cmp(const void* e1, const void* e2) {
+  return (int)-timestamp_cmp(((event_t*)e1)->dtstart, ((event_t*)e2)->dtstart);
+}
 
+int main(int argc, char **argv) {
   sb_t cal_file = { 0 };
   arena_t arena = { 0 };
 
@@ -272,24 +275,97 @@ int main(int argc, char **argv) {
 
   parse_calendar(&arena, &cal_file, &calendar);
 
-  eventarr_t today;
+  eventarr_t today = { 0 };
 
-  LOG_INFO("%zu events.", calendar.events.count);
   da_foreach(event_t, e, &calendar.events) {
     // LOG_INFO("%s -> %lld", e->summary, timestamp_cmp(e->dtstart, today_00()));
     // LOG_INFO("%02d/%02d/%04d", e->dtstart.d, e->dtstart.m, e->dtstart.y);
     if (
-      timestamp_cmp(e->dtstart, today_00()) > 0 &&
-      timestamp_cmp(e->dtend, today_24()) < 0
+      ( timestamp_cmp(e->dtstart, today_00()) > 0 &&
+        timestamp_cmp(e->dtstart, today_24()) < 0 ) ||
+      ( timestamp_cmp(e->dtend, today_00()) > 0 &&
+        timestamp_cmp(e->dtend, today_24()) < 0)
     ) {
       da_append(&today, *e);
       // LOG_INFO("%s", e->summary);
     }
   }
 
-  // TODO: print sorted today array
- 
-  LOG_INFO("Done");
+  // TODO: handle events spanning multiple days
+  qsort(today.items, today.count, sizeof(*today.items), (int(*)(const void*, const void*))qsort_event_cmp);
+  if (!argc || strcmp("list", argv[1]) == 0) {
+    da_foreach(event_t, e, &today) {
+      printf("[%02d:%02d - %02d:%02d] %s\n", e->dtstart.hh, e->dtstart.mm, e->dtend.hh, e->dtend.mm, e->summary);
+    }
+  } else if (strcmp("table", argv[1]) == 0) {
+
+    event_t *first = today.items;
+    for (;; first++) {
+      if (timestamp_cmp(first->dtstart, today_00()) > 0) break;
+    }
+    event_t *last = today.items;
+    da_foreach(event_t, ev, &today) {
+      if (timestamp_cmp(today_24(), ev->dtend) > 0 && timestamp_cmp(ev->dtend, last->dtend) > 0) last = ev;
+    }
+
+    size_t h_start = first->dtstart.hh;
+    size_t h_end   = last->dtend.hh + (last->dtend.mm > 0);
+
+    size_t h_diff = h_end - h_start;
+    size_t space = 100 / h_diff;
+
+    timestamp_t n = now();
+    uint64_t now_h = (n.hh * space)   + (n.mm / (60 / space));
+
+    for (size_t i = h_start * space; i <= h_end * space; i++ ) {
+      if (i == now_h) {
+        printf("|");
+      } else if (i % space == 0) {
+        printf("%02zu", i / space);
+      } else if (i % space == 1) {
+        (void)0;
+      } else {
+        printf("-");
+      }
+    }
+    printf("\n");
+
+    da_foreach(event_t, e, &today) {
+      for (size_t i = h_start * space; i <= h_end * space; i++ ) {
+        uint64_t start = (e->dtstart.hh * space) + (e->dtstart.mm / (60 / space));
+        uint64_t end   = (e->dtend.hh * space)   + (e->dtend.mm / (60 / space));
+
+        if (i == now_h) {
+          printf("|");
+        } else if (i == start) {
+          printf("[");
+        } else if (i > start && i < end) {
+          printf("x");
+        } else if (i == end) {
+          printf("]");
+        } else {
+            if (i % space == 0) {
+              printf("|");
+          } else {
+            printf(".");
+          }
+        }
+      }
+      printf(" %s\n", e->summary);
+    }
+
+    for (size_t i = h_start * space; i <= h_end * space; i++ ) {
+      if (i == now_h) {
+        printf("|");
+      } else if (i % space == 0) {
+        printf("%02zu", i / space);
+      } else if (i % space == 1) {
+        (void)0;
+      } else {
+        printf("-");
+      }
+    }
+  }
 
   return 0;
 }
