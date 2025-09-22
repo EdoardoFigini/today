@@ -1,7 +1,13 @@
 #include <ctype.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define WIN32_MEAN_AND_LEAN
+#include <windows.h>
+#endif
 
 #define SB_IMPLEMENTATION
 #include "sb.h"
@@ -108,7 +114,6 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
   for (size_t i = 0; i < lines.count; i++, key_value.count = 0) {
   // for (size_t i = 0; i < 25; i++, key_value.count = 0) {
     split(lines.items + i, ":", 1, &key_value);
-    char tz;
     slice_t key = key_value.items[0];
     slice_t value = key_value.items[1];
     // LOG_DEBUG("-%.*s -> %.*s-", SLICE_FMT(key), SLICE_FMT(value));
@@ -174,6 +179,86 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
   return 0;
 }
 
+timestamp_t now() {
+#ifdef _WIN32
+  SYSTEMTIME st = { 0 };
+  GetLocalTime(&st);
+  return (timestamp_t) {
+    .y = st.wYear,
+    .m = st.wMonth,
+    .d = st.wDay,
+    .hh = st.wHour,
+    .mm = st.wMinute,
+    .ss = st.wSecond,
+  };
+#endif
+}
+
+timestamp_t today_00() {
+#ifdef _WIN32
+  SYSTEMTIME st = { 0 };
+  GetLocalTime(&st);
+  return (timestamp_t) {
+    .y = st.wYear,
+    .m = st.wMonth,
+    .d = st.wDay,
+  };
+#endif
+}
+
+timestamp_t today_24() {
+#ifdef _WIN32
+  SYSTEMTIME st = { 0 };
+  GetLocalTime(&st);
+  return (timestamp_t) {
+    .y = st.wYear,
+    .m = st.wMonth,
+    .d = st.wDay,
+    .hh = 23,
+    .mm = 59,
+    .ss = 59
+  };
+#endif
+}
+
+#ifdef _WIN32
+SYSTEMTIME timestamp_to_systime(timestamp_t t) {
+  return (SYSTEMTIME) {
+    .wYear = (WORD)t.y,
+    .wMonth = (WORD)t.m,
+    .wDay = (WORD)t.d,
+    .wHour = (WORD)t.hh,
+    .wMinute = (WORD)t.mm,
+    .wSecond = (WORD)t.ss,
+    .wMilliseconds = 0,
+  };
+}
+#endif
+
+int64_t timestamp_cmp(timestamp_t a, timestamp_t b) {
+#ifdef _WIN32
+  SYSTEMTIME sta = timestamp_to_systime(a);
+  SYSTEMTIME stb = timestamp_to_systime(b);
+
+  FILETIME fta = { 0 };
+  FILETIME ftb = { 0 };
+
+  if (!SystemTimeToFileTime(&sta, &fta)) return -INT_MAX;
+  if (!SystemTimeToFileTime(&stb, &ftb)) return -INT_MAX;
+
+  LARGE_INTEGER lia = {
+    .LowPart  = fta.dwLowDateTime,
+    .HighPart = fta.dwHighDateTime,
+  };
+  LARGE_INTEGER lib = {
+    .LowPart  = ftb.dwLowDateTime,
+    .HighPart = ftb.dwHighDateTime,
+  };
+
+  return lia.QuadPart - lib.QuadPart;
+#endif
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -187,19 +272,22 @@ int main(int argc, char **argv) {
 
   parse_calendar(&arena, &cal_file, &calendar);
 
-  // TODO: now store timestamps in uin64_t, lin search (for now) array for
-  // dtstart < tomorrw@00 && dtend > today@00. store indexes of found elements
-  // in final array (or store events directly idk) to be displayed.
+  eventarr_t today;
 
   LOG_INFO("%zu events.", calendar.events.count);
   da_foreach(event_t, e, &calendar.events) {
-    LOG_INFO(
-      "[%d/%02d/%02d %02d:%02d:%02d - %d/%02d/%02d %02d:%02d:%02d]\t%s",
-      e->dtstart.y, e->dtstart.m, e->dtstart.d, e->dtstart.hh, e->dtstart.mm, e->dtstart.ss,
-      e->dtend.y, e->dtend.m, e->dtend.d, e->dtend.hh, e->dtend.mm, e->dtend.ss,
-      e->summary
-    );
+    // LOG_INFO("%s -> %lld", e->summary, timestamp_cmp(e->dtstart, today_00()));
+    // LOG_INFO("%02d/%02d/%04d", e->dtstart.d, e->dtstart.m, e->dtstart.y);
+    if (
+      timestamp_cmp(e->dtstart, today_00()) > 0 &&
+      timestamp_cmp(e->dtend, today_24()) < 0
+    ) {
+      da_append(&today, *e);
+      // LOG_INFO("%s", e->summary);
+    }
   }
+
+  // TODO: print sorted today array
  
   LOG_INFO("Done");
 
