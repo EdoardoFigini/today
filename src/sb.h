@@ -6,7 +6,7 @@
 #include <stdarg.h>
 #include <string.h>
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -108,6 +108,7 @@ void sb_free(sb_t* sb);
 
 size_t sb_reserve(sb_t *sb, size_t size) {
   if (size < sb->size) return 0;
+  // ensure nearest power of two
   if (size && (!(size & (size - 1))) == 0) {
     size--;
     for (short i = 1; i <= 32; i <<= 1)
@@ -115,7 +116,7 @@ size_t sb_reserve(sb_t *sb, size_t size) {
     size++;
   }
 
-#ifdef _MSC_VER
+#ifdef _WIN32
     sb->items = sb->items
                 ? HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sb->items, size)
                 : HeapAlloc(GetProcessHeap(),   HEAP_ZERO_MEMORY, size);
@@ -133,12 +134,11 @@ int sb_n_append(sb_t *sb, const char *str, size_t len) {
     sb_reserve(sb, SB_DEFAULT_SIZE);
     if (sb->items == NULL) return -1;
   }
-  if (len + sb->count > sb->size) {
+  while (len + sb->count >= sb->size) // = avoids realloc at next call
     sb->size *= SB_GROWTH_FACTOR;
-    sb_reserve(sb, sb->size);
-    if (sb->items == NULL) return -1;
-  }
-#ifdef _MSC_VER
+  sb_reserve(sb, sb->size);
+  if (sb->items == NULL) return -1;
+#ifdef _WIN32
   CopyMemory(sb->items + sb->count, str, len);
 #else
   memcpy(sb->items + sb->count, str, len);
@@ -169,7 +169,7 @@ int sb_appendf(sb_t *sb, const char* fmt, ...) {
   va_start(args, fmt);
   va_copy(args_copy, args);
 
-#ifdef _MSC_VER
+#ifdef _WIN32
   int n = _vscprintf(fmt, args);
 #else
   int n = vsnprintf(NULL, 0, fmt, args);
@@ -195,13 +195,13 @@ int sb_appendf(sb_t *sb, const char* fmt, ...) {
 int sb_read_file(const char *filename, sb_t* sb) {
   int read = 0;
 
-#ifdef _MSC_VER
+#ifdef _WIN32
   ZeroMemory(sb, sizeof(*sb));
 #else
   memset(sb, 0, sizeof(*sb));
 #endif
 
-#ifdef _MSC_VER
+#ifdef _WIN32
   HANDLE hFile = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
   if (hFile == INVALID_HANDLE_VALUE) return -1;
 
@@ -236,7 +236,7 @@ int sb_read_file(const char *filename, sb_t* sb) {
 int sb_write_file(const char *filename, sb_t* sb) {
   int written = 0;
 
-#ifdef _MSC_VER
+#ifdef _WIN32
   HANDLE hFile = CreateFileA(filename, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL);
   if (hFile == INVALID_HANDLE_VALUE) return -1;
 
@@ -260,7 +260,7 @@ int sb_concat(sb_t* a, sb_t* b) {
 }
 
 void sb_free(sb_t* sb) {
-#ifdef _MSC_VER
+#ifdef _WIN32
   HeapFree(GetProcessHeap(), HEAP_NO_SERIALIZE, sb->items);
   ZeroMemory(sb, sizeof(*sb));
 #else

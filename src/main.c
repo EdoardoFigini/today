@@ -7,6 +7,7 @@
 #ifdef _WIN32
 #define WIN32_MEAN_AND_LEAN
 #include <windows.h>
+#include <wininet.h>
 
 #define TO_SECS(x) (x) / ( 1000 * 1000 * 10 )
 #endif
@@ -49,6 +50,7 @@ typedef struct {
 
 typedef struct {
   // const char* version;
+  const char* name;
   eventarr_t events;
 } calendar_t;
 
@@ -68,9 +70,12 @@ typedef struct {
 typedef enum {
   STATE_CAL = 0,
   STATE_EVENT,
+  STATE_OTHER,
 } parse_state_t;
 
 void split(slice_t* s, const char* sep, unsigned int limit, slicearr_t* sa) {
+  if (!s || !s->data) return;
+  if (!sa) return;
   size_t start = 0;
   size_t sep_len = strlen(sep);
   for (size_t i=0; i < s->size && (limit == 0 || sa->count < limit); i++) {
@@ -102,7 +107,9 @@ int slice_atoi(slice_t *s) {
 #define slice_starts_with(s, str) \
   (strlen(str) <= s->size && memcmp(s->data, str, strlen(str)) == 0)
 
-int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
+// TODO: retrieve calendar name from X-WR-CALNAME, not user-defined.
+// this would mean having a calendars file which is just a list of links, no names
+int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* calendar) {
   slicearr_t lines = { 0 };
 
   slice_t cal_slice = { .data = cal->items, .size = cal->count };
@@ -120,20 +127,24 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
     slice_t value = key_value.items[1];
     // LOG_DEBUG("-%.*s -> %.*s-", SLICE_FMT(key), SLICE_FMT(value));
 
-    if (memcmp(key.data, "BEGIN", key.size ) == 0) {
+    if (memcmp(key.data, "X-WR-CALNAME", key.size ) == 0) {
+      calendar->name = arena_sprintf(arena, "%.*s", SLICE_FMT(value));
+    } else if (memcmp(key.data, "BEGIN", key.size ) == 0) {
       if (memcmp(value.data, "VEVENT", value.size) == 0) {
         // LOG_DEBUG("BEGIN:VEVENT");
         if (state == STATE_EVENT) {
-          LOG_ERROR("Unclosed event");
+          LOG_ERROR("%s:%zu: Unclosed event", filename, i + 1);
           return -1;
         }
         state = STATE_EVENT;
+      } else {
+        state = STATE_OTHER;
       }
     } else if (memcmp(key.data, "END", key.size) == 0) {
       if (memcmp(value.data, "VEVENT", value.size) == 0) {
         // LOG_DEBUG("END:VEVENT");
         if (state != STATE_EVENT) {
-          LOG_ERROR("Closing event before BEGIN:VEVENT");
+          LOG_ERROR("%s:%zu: Closing event before BEGIN:VEVENT", filename, i + 1);
           return -1;
         }
         state = STATE_CAL;
@@ -143,14 +154,15 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
     } else if (memcmp(key.data, "SUMMARY", key.size) == 0) {
       // LOG_DEBUG("SUMMARY");
       if (state != STATE_EVENT) {
-        LOG_ERROR("Summary outside of event.");
+        LOG_ERROR("%s:%zu: Summary outside of event.", filename, i + 1);
         return -1;
       }
       e.summary = arena_sprintf(arena, "%.*s", SLICE_FMT(value));
     } else if (memcmp(key.data, "DTSTART", key.size) == 0) {
       // LOG_DEBUG("SUMMARY");
+      if (state == STATE_OTHER) continue;
       if (state != STATE_EVENT) {
-        LOG_ERROR("Start time outside of event.");
+        LOG_ERROR("%s:%zu: Start time outside of event.", filename, i + 1);
         return -1;
       }
       e.dtstart = (timestamp_t){
@@ -163,8 +175,9 @@ int parse_calendar(arena_t* arena, sb_t* cal, calendar_t* calendar) {
       };
     } else if (memcmp(key.data, "DTEND", key.size) == 0) {
       // LOG_DEBUG("SUMMARY");
+      if (state == STATE_OTHER) continue;
       if (state != STATE_EVENT) {
-        LOG_ERROR("End time outside of event.");
+        LOG_ERROR("%s:%zu: End time outside of event.", filename, i + 1);
         return -1;
       }
       e.dtend = (timestamp_t){
@@ -225,7 +238,7 @@ timestamp_t today_24() {
 
 #ifdef _WIN32
 SYSTEMTIME timestamp_to_systime(timestamp_t t) {
-  return (SYSTEMTIME) {
+  SYSTEMTIME st = (SYSTEMTIME) {
     .wYear = (WORD)t.y,
     .wMonth = (WORD)t.m,
     .wDay = (WORD)t.d,
@@ -234,6 +247,12 @@ SYSTEMTIME timestamp_to_systime(timestamp_t t) {
     .wSecond = (WORD)t.ss,
     .wMilliseconds = 0,
   };
+  // force normalization
+  FILETIME ft = { 0 };
+  SYSTEMTIME local;
+  SystemTimeToFileTime(&st, &ft);
+  FileTimeToSystemTime(&ft, &local);
+  return local;
 }
 #endif
 
@@ -261,19 +280,227 @@ int64_t timestamp_cmp(timestamp_t a, timestamp_t b) {
 #endif
 }
 
+void timestamp_day_print(timestamp_t t) {
+  PCSTR dn[] = { "Sunday", "Monday", "Tuesday", 
+  "Wednesday", "Thursday", "Friday", "Saturday" };
+  // FIXME: only on Windows
+  printf("%s - %d/%d/%d", dn[timestamp_to_systime(t).wDayOfWeek], t.d, t.m, t.y);
+}
+
 int qsort_event_cmp(const void* e1, const void* e2) {
   return (int)-timestamp_cmp(((event_t*)e1)->dtstart, ((event_t*)e2)->dtstart);
 }
+
+int http_get(slice_t* url, sb_t* out) {
+  out->count = 0;
+  slicearr_t url_structure = { 0 };
+  split(url, "//", 1, &url_structure);
+  if (url_structure.count < 2) {
+    fprintf(stderr, "[ERR ] Failed to parse URL `%.*s`\n", SLICE_FMT(*url));
+    return 1;
+  }
+
+  int schema = 0; // http = 0, https = 1;
+  if (memcmp(url_structure.items[0].data, "http", 4)) {
+    fprintf(stderr, "[WARN] No schema specified in url, assuming HTTP\n");
+  } else {
+    if (memcmp(url_structure.items[0].data, "https", 5) == 0) {
+      schema = 1;
+    } else if (memcmp(url_structure.items[0].data, "http", 4) == 0) {
+      schema = 0;
+    } else {
+      fprintf(stderr, "Invalid schema %.*s", SLICE_FMT(url_structure.items[0]));
+      return 1;
+    }
+  }
+
+  slice_t url_path = url_structure.items[1];
+  url_structure.count = 0;
+  split(&url_path, "/", 1, &url_structure);
+
+#ifdef _WIN32
+  if (schema != 0) {
+    fprintf(stderr, "[ERR ] HTTPS not supported yet\n");
+    return 1;
+  }
+
+  LPCSTR lpszHost = LocalAlloc(LPTR, url_structure.items[0].size + 1);
+  CopyMemory((LPVOID)lpszHost, url_structure.items[0].data, url_structure.items[0].size);
+
+  LPCSTR lpszObj = LocalAlloc(LPTR, url_structure.items[1].size + 1);
+  CopyMemory((LPVOID)lpszObj, url_structure.items[1].data, url_structure.items[1].size);
+
+  HINTERNET hInternet = NULL;
+  HINTERNET hConnect  = NULL;
+  HINTERNET hRequest  = NULL;
+
+  hInternet = InternetOpenA(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+    INTERNET_OPEN_TYPE_DIRECT,
+    NULL,
+    NULL,
+    0
+  );
+  if (hInternet == NULL) return 1;
+
+  hConnect = InternetConnectA(
+    hInternet,
+    lpszHost,
+    schema ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT,
+    NULL,
+    NULL,
+    INTERNET_SERVICE_HTTP,
+    INTERNET_FLAG_NO_CACHE_WRITE,
+    0
+  );
+  if (hConnect == NULL) return 1;
+
+  hRequest = HttpOpenRequestA(
+    hConnect,
+    "GET",
+    lpszObj,
+    NULL,
+    NULL,
+    (PCTSTR[]){"text/calendar", NULL},
+    INTERNET_FLAG_NO_CACHE_WRITE,
+    0
+  );
+  if (hRequest == NULL) return 1;
+
+  BOOL res = HttpSendRequestA(
+    hRequest,
+    NULL,
+    (DWORD)-1,
+    NULL,
+    0
+  );
+  if (!res) return 1;
+
+  BYTE buffer[4096];
+  DWORD dwRead = 0;
+  do {
+    dwRead = 0;
+    res = InternetReadFile(
+      hRequest,
+      buffer,
+      sizeof(buffer)/sizeof(*buffer),
+      (LPDWORD)&dwRead
+    );
+    if (!res) return 1;
+
+    sb_n_append(out, (const char*)buffer, dwRead);
+    fprintf(stderr, "[INFO] extended output to %zu bytes (%lu read).\n", out->count, dwRead);
+  } while (res && dwRead > 0);
+
+  return 0;
+#else
+  return 1;/
+#endif // platform
+}
+
+#define shift(argc, argv) (argc-- > 0 ? *(argv++) : NULL);
 
 int main(int argc, char **argv) {
   sb_t cal_file = { 0 };
   arena_t arena = { 0 };
 
+  const char* program = shift(argc, argv);
+  fprintf(stderr, "%s\n", program);
+  int help = 0;
+  int refresh = 0;
+  struct {
+    int set;
+    const char* url;
+    const char* name;
+  } add = { 0 };
+
+  char* arg = shift(argc, argv);
+  while (arg) {
+    if (*arg != '-') break;
+    if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0)
+      help = 1;
+    else if (strcmp(arg, "--add") == 0 || strcmp(arg, "-a") == 0) {
+      add.url = shift(argc, argv);
+      if (!add.url) {
+        fprintf(stderr, "Expected <url> after --add option.\n");
+        return 1;
+      }
+      add.name = shift(argc, argv);
+      if (!add.name) {
+        fprintf(stderr, "Expected <name> after --add option.\n");
+        return 1;
+      }
+      add.set = 1;
+    } else if (strcmp(arg, "--refresh") == 0 || strcmp(arg, "-r") == 0) {
+      refresh = 1;
+    } else {
+      fprintf(stderr, "Unknown flag %s", arg);
+      return 1;
+    }
+    arg = shift(argc, argv);
+  }
+
+  const char* format = arg;
+
+  if (help) {
+    fprintf(stdout, "USAGE: %s [OPTION] <format>\n", program);
+    fprintf(stdout, "OPTIONS:\n");
+    fprintf(stdout, "\t--help     -h               Shows this message and exits with 0.\n");
+    fprintf(stdout, "\t--refresh  -r               Refreshes all the calendars.\n");
+    fprintf(stdout, "\t--add      -a <url> <name>  Adds <url> to the list of calendars.\n");
+    return 0;
+  }
+
+  if (refresh) {
+    sb_t urls = { 0 };
+    const char* filename = "calendars.csv";
+    sb_read_file(filename, &urls);
+    slice_t cal_slice = { .data = urls.items, .size = urls.count };
+    slicearr_t lines = { 0 };
+    split(&cal_slice, "\r\n", 0, &lines);
+    fprintf(stderr, "%zu\n", lines.count);
+
+    slicearr_t csv_line = { 0 };
+    // skip title line
+    for (size_t i = 1; i < lines.count; i++) {
+      // fprintf(stderr, "line %zu: %*s, %zu\n", i+1, SLICE_FMT(lines.items[i]), lines.items[i].size);
+      if (lines.items[i].size == 0) continue;
+
+      csv_line.count = 0;
+      cal_file.count = 0;
+
+      split(&lines.items[i], ", ", 0, &csv_line);
+      if (csv_line.count < 2 ) {
+        fprintf(stderr, "[ERR ] %s:%zu: Could not parse CSV line.\n", filename, i+1);
+        continue;
+      }
+      slice_t name = csv_line.items[0];
+      slice_t url  = csv_line.items[1];
+      if(http_get(&url, &cal_file)) {
+        fprintf(stderr, "[ERR ] HTTP GET `%.*s` failed\n", SLICE_FMT(url));
+        continue;
+      }
+      fprintf(stderr, "[INFO] Writing %zu bytes to cache.\n", cal_file.count);
+      sb_write_file(arena_sprintf(&arena, "%.*s.ics", SLICE_FMT(name)), &cal_file);
+    }
+
+    return 0;
+  }
+
+  if (add.set) {
+    // TODO: add to calendars.csv
+    return 1;
+  }
+
   calendar_t calendar = { 0 };
 
-  sb_read_file("test.ics", &cal_file);
+  // TODO: foreach entry in calendars.csv
+  const char* calname = "iphone.ics";
+  sb_read_file(calname, &cal_file);
 
-  parse_calendar(&arena, &cal_file, &calendar);
+  if(parse_calendar(&arena, &cal_file, calname, &calendar)) {
+    return 1;
+  }
 
   eventarr_t today = { 0 };
 
@@ -291,13 +518,22 @@ int main(int argc, char **argv) {
     }
   }
 
+  printf("Events for today, ");
+  timestamp_day_print(now());
+  printf("\n");
+
+  if (!today.items || today.count == 0) {
+    printf("No events.\n");
+    return 0;
+  }
+
   // TODO: handle events spanning multiple days
   qsort(today.items, today.count, sizeof(*today.items), (int(*)(const void*, const void*))qsort_event_cmp);
-  if (!argc || strcmp("list", argv[1]) == 0) {
+  if (!arg || strcmp("list", format) == 0) {
     da_foreach(event_t, e, &today) {
-      printf("[%02d:%02d - %02d:%02d] %s\n", e->dtstart.hh, e->dtstart.mm, e->dtend.hh, e->dtend.mm, e->summary);
+      printf("[%02d:%02d - %02d:%02d] %s (%s)\n", e->dtstart.hh, e->dtstart.mm, e->dtend.hh, e->dtend.mm, e->summary, calendar.name);
     }
-  } else if (strcmp("table", argv[1]) == 0) {
+  } else if (strcmp("table", format) == 0) {
 
     event_t *first = today.items;
     for (;; first++) {
