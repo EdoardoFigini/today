@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     nob_cmd_append(&cmd,"/c");
     nob_cmd_append(&cmd, nob_temp_sprintf(SRC_DIR "%s", *s));
     nob_da_append(&objects, obj_path);
-    nob_cmd_append(&cmd,"/DLOG_NOCOLOR");
+    // nob_cmd_append(&cmd,"/DLOG_NOCOLOR");
 #endif
     if (!nob_cmd_run(&cmd, .async = &procs)) return 1;
   }
