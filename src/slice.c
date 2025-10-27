@@ -35,3 +35,22 @@ int sized_atoi(const char* data, size_t size) {
 int slice_atoi(slice_t *s) {
   return sized_atoi(s->data, s->size);
 }
+
+void slice_trim_start(slice_t* s) {
+  int i = 0;
+  while(i < s->size && isspace(s->data[i])) {
+    s->size--;
+    s->data++;
+  }
+}
+
+void slice_trim_end(slice_t* s) {
+  while(s->size > 0 && isspace(s->data[s->size - 1])) {
+    s->size--;
+  }
+}
+
+void slice_trim(slice_t* s) {
+  slice_trim_start(s);
+  slice_trim_end(s);
+}

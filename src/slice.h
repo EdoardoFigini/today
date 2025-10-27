@@ -23,5 +23,8 @@ typedef struct {
 void split(slice_t* s, const char* sep, unsigned int limit, slicearr_t* sa);
 int sized_atoi(const char* data, size_t size);
 int slice_atoi(slice_t *s);
+void slice_trim_start(slice_t* s);
+void slice_trim_end(slice_t* s);
+void slice_trim(slice_t* s);
 
 #endif

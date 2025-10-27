@@ -57,7 +57,7 @@ int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* 
   slicearr_t lines = { 0 };
 
   slice_t cal_slice = { .data = cal->items, .size = cal->count };
-  split(&cal_slice, "\r\n", 0, &lines);
+  split(&cal_slice, "\n", 0, &lines);
 
   event_t e = { 0 };
   parse_state_t state = STATE_UNDEF;
@@ -65,7 +65,8 @@ int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* 
   slicearr_t key_value = { 0 };
 
   for (size_t i = 0; i < lines.count; i++, key_value.count = 0) {
-  // for (size_t i = 0; i < 25; i++, key_value.count = 0) {
+    slice_trim(&lines.items[i]);
+
     split(lines.items + i, ":", 1, &key_value);
     slice_t key = key_value.items[0];
     slice_t value = key_value.items[1];
@@ -156,11 +157,13 @@ char* get_cal_name(arena_t* arena, sb_t* cal) {
   slicearr_t lines = { 0 };
 
   slice_t cal_slice = { .data = cal->items, .size = cal->count };
-  split(&cal_slice, "\r\n", 0, &lines);
+  split(&cal_slice, "\n", 0, &lines);
 
   slicearr_t key_value = { 0 };
 
   for (size_t i = 0; i < lines.count; i++, key_value.count = 0) {
+    slice_trim(&lines.items[i]);
+
     split(lines.items + i, ":", 1, &key_value);
     slice_t key = key_value.items[0];
     slice_t value = key_value.items[1];
@@ -200,9 +203,10 @@ int http_get(slice_t* url, sb_t* out) {
   split(&url_path, "/", 1, &url_structure);
 
 #ifdef _WIN32
+  // TODO: support HTTPS
   if (schema != 0) {
-    LOG_ERROR("HTTPS not supported yet");
-    return 1;
+    LOG_ERROR("HTTPS not supported yet, falling back to HTTP");
+    schema = 0;
   }
 
   LPCSTR lpszHost = LocalAlloc(LPTR, url_structure.items[0].size + 1);
@@ -288,10 +292,11 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
   sb_read_file(urls_path, &urls);
   slice_t cal_slice = { .data = urls.items, .size = urls.count };
   slicearr_t lines = { 0 };
-  split(&cal_slice, "\r\n", 0, &lines);
+  split(&cal_slice, "\n", 0, &lines);
 
   for (size_t i = 0; i < lines.count; i++) {
     if (lines.items[i].size == 0) continue;
+    slice_trim(&lines.items[i]);
 
     calendar.count = 0;
 
@@ -304,8 +309,6 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
       continue;
     }
 
-    calendar_t c = { 0 };
-    // if(parse_calendar(arena, &calendar, NULL, &c)) return 1;
     char* cal_name = get_cal_name(arena, &calendar);
     if (cal_name == NULL) {
       LOG_WARN("Could not find name for `%.*s`", SLICE_FMT(url));
@@ -319,6 +322,15 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
 
   sb_free(&urls);
   sb_free(&cals);
+
+  return 0;
+}
+
+int add(const char* url, const char* urls_path) {
+  sb_t sb = { 0 };
+
+  sb_appendln(&sb, url);
+  if (sb_append_to_file(urls_path, &sb) <= 0) return 1;
 
   return 0;
 }
@@ -338,7 +350,6 @@ int main(int argc, char **argv) {
   struct {
     int set;
     const char* url;
-    const char* name;
   } f_add = { 0 };
 
   char* arg = shift(argc, argv);
@@ -350,11 +361,6 @@ int main(int argc, char **argv) {
       f_add.url = shift(argc, argv);
       if (!f_add.url) {
         LOG_ERROR("Expected <url> after --add option.");
-        return 1;
-      }
-      f_add.name = shift(argc, argv);
-      if (!f_add.name) {
-        LOG_ERROR("Expected <name> after --add option.");
         return 1;
       }
       f_add.set = 1;
@@ -378,13 +384,12 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (f_refresh) {
-    if(refresh(&arena, cals_fn, urls_fn)) return 1;
+  if (f_add.set) {
+    if(add(f_add.url, urls_fn)) return 1;
   }
 
-  if (f_add.set) {
-    // TODO: add to urls 
-    return 1;
+  if (f_refresh) {
+    if(refresh(&arena, cals_fn, urls_fn)) return 1;
   }
 
   sb_t cals_fnames = { 0 };
