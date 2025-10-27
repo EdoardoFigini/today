@@ -87,7 +87,14 @@ int sb_read_file(const char *filename, sb_t* sb);
  * @param sb pointer to sb_t structure
  * @return If >= 0 the number of chars read, if < 0 error.
  */
-int sb_write_file(const char *filename, sb_t* sb);
+int sb_write_to_file(const char *filename, sb_t* sb);
+/*
+ * Appends sb to a file
+ * @param filename path of the file to write
+ * @param sb pointer to sb_t structure
+ * @return If >= 0 the number of chars read, if < 0 error.
+ */
+int sb_append_to_file(const char *filename, sb_t* sb);
 /*
  * Concats the contents of a sb to another.
  * @param a pointer to sb_t structure that will be extended
@@ -233,10 +240,11 @@ int sb_read_file(const char *filename, sb_t* sb) {
   return read;
 }
 
-int sb_write_file(const char *filename, sb_t* sb) {
+int sb_write_to_file(const char *filename, sb_t* sb) {
   int written = 0;
 
 #ifdef _WIN32
+  DeleteFileA(filename);
   HANDLE hFile = CreateFileA(filename, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL);
   if (hFile == INVALID_HANDLE_VALUE) return -1;
 
@@ -246,6 +254,29 @@ int sb_write_file(const char *filename, sb_t* sb) {
 #else
   FILE* fp = NULL;
   fp = fopen(filename, "w");
+  if (!fp) return -1;
+
+  written = fprintf(fp, "%.*s", SB_FMT(*sb));
+
+  fclose(fp);
+#endif
+  return written;
+}
+
+
+int sb_append_to_file(const char *filename, sb_t* sb) {
+  int written = 0;
+
+#ifdef _WIN32
+  HANDLE hFile = CreateFileA(filename, FILE_GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile == INVALID_HANDLE_VALUE) return -1;
+
+  if (!WriteFile(hFile, (LPCVOID)sb->items, (DWORD)sb->count, (LPDWORD)&written, NULL)) return -1;
+
+  CloseHandle(hFile);
+#else
+  FILE* fp = NULL;
+  fp = fopen(filename, "a");
   if (!fp) return -1;
 
   written = fprintf(fp, "%.*s", SB_FMT(*sb));

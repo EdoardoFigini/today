@@ -19,6 +19,7 @@
 
 #include "logging.h"
 #include "timestamp.h"
+#include "slice.h"
 
 typedef struct {
   size_t dtstamp;
@@ -44,64 +45,14 @@ typedef struct {
   eventarr_t events;
 } calendar_t;
 
-typedef struct {
-  char* data;
-  size_t size;
-} slice_t;
-
-#define SLICE_FMT(s) (int)(s).size, (s).data
-
-typedef struct {
-  slice_t* items;
-  size_t count;
-  size_t capacity;
-} slicearr_t;
-
 typedef enum {
-  STATE_CAL = 0,
+  STATE_UNDEF = 0,
+  STATE_CAL,
   STATE_EVENT,
   STATE_OTHER,
 } parse_state_t;
 
-void split(slice_t* s, const char* sep, unsigned int limit, slicearr_t* sa) {
-  if (!s || !s->data) return;
-  if (!sa) return;
-  size_t start = 0;
-  size_t sep_len = strlen(sep);
-  for (size_t i=0; i < s->size && (limit == 0 || sa->count < limit); i++) {
-    if (s->size - i >= sep_len && memcmp(s->data + i, sep, sep_len) == 0) {
-      da_append(sa, ((slice_t){ .data = s->data + start, .size = i - start }));
-      i += sep_len - 1;
-      start = i + 1;
-    }
-  }
-  da_append(sa, ((slice_t){ .data = s->data + start, .size = s->size - start }));
-}
 
-int sized_atoi(const char* data, size_t size) {
-  int n = 0;
-  int sign = 1;
-  if (size == 0) return 0;
-  for (size_t i=0; i < size; i++, data++) {
-    if (i==0 && *data == '-') { sign = -1; continue; }
-    if (!isdigit(*data)) return 0;
-    n = (n * 10) + (*data - '0');
-  }
-  return n * sign;
-}
-
-int slice_atoi(slice_t *s) {
-  return sized_atoi(s->data, s->size);
-}
-
-#define slice_starts_with(s, str) \
-  (strlen(str) <= (s)->size && memcmp((s)->data, str, strlen(str)) == 0)
-
-#define slice_eq(s, str) \
-  ((s)->size > 0 && memcmp((s)->data, str, (s)->size) == 0)
-
-// TODO: retrieve calendar name from X-WR-CALNAME, not user-defined.
-// this would mean having a calendars file which is just a list of links, no names
 int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* calendar) {
   slicearr_t lines = { 0 };
 
@@ -109,7 +60,7 @@ int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* 
   split(&cal_slice, "\r\n", 0, &lines);
 
   event_t e = { 0 };
-  parse_state_t state = STATE_CAL;
+  parse_state_t state = STATE_UNDEF;
 
   slicearr_t key_value = { 0 };
 
@@ -129,7 +80,13 @@ int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* 
           return -1;
         }
         state = STATE_EVENT;
-      } else {
+      } else if (slice_eq(&value, "VCALENDAR")) {
+        if (state != STATE_UNDEF) {
+          LOG_ERROR("%s:%zu: Unexpected start of calendar", filename, i + 1);
+          return -1;
+        }
+        state = STATE_CAL;
+      }else {
         state = STATE_OTHER;
       }
     } else if (slice_eq(&key, "END")) {
@@ -139,11 +96,18 @@ int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* 
           LOG_ERROR("%s:%zu: Closing event before BEGIN:VEVENT", filename, i + 1);
           return -1;
         }
-        state = STATE_CAL;
         e.cal_name = calendar->name;
-        da_append(&calendar->events, e);
+        da_append(&calendar->events, e); // copies
         memset(&e, 0, sizeof(e));
+      } else if (slice_eq(&value, "VCALENDAR")) {
+        if (state != STATE_CAL) {
+          LOG_ERROR("%s:%zu: Unexpected end of calendar", filename, i + 1);
+          return -1;
+        }
+        return 0;
       }
+
+      state = STATE_CAL;
     } else if (slice_eq(&key, "SUMMARY")) {
       // LOG_DEBUG("SUMMARY");
       if (state != STATE_EVENT) {
@@ -185,6 +149,29 @@ int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* 
   }
 
   return 0;
+}
+
+char* get_cal_name(arena_t* arena, sb_t* cal) {
+  char* name = NULL;
+  slicearr_t lines = { 0 };
+
+  slice_t cal_slice = { .data = cal->items, .size = cal->count };
+  split(&cal_slice, "\r\n", 0, &lines);
+
+  slicearr_t key_value = { 0 };
+
+  for (size_t i = 0; i < lines.count; i++, key_value.count = 0) {
+    split(lines.items + i, ":", 1, &key_value);
+    slice_t key = key_value.items[0];
+    slice_t value = key_value.items[1];
+
+    if (slice_eq(&key, "X-WR-CALNAME")) {
+      name = arena_sprintf(arena, "%.*s", SLICE_FMT(value));
+      break;
+    }
+  }
+
+  return name;
 }
 
 int qsort_event_cmp(const void* e1, const void* e2) {
@@ -318,13 +305,17 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
     }
 
     calendar_t c = { 0 };
-    if(parse_calendar(arena, &calendar, NULL, &c)) return 1;
-    char* cal_path = arena_sprintf(arena, "%s.ics", c.name); 
+    // if(parse_calendar(arena, &calendar, NULL, &c)) return 1;
+    char* cal_name = get_cal_name(arena, &calendar);
+    if (cal_name == NULL) {
+      LOG_WARN("Could not find name for `%.*s`", SLICE_FMT(url));
+    }
+    char* cal_path = arena_sprintf(arena, "%s.ics", cal_name); 
     sb_appendln(&cals, cal_path);
-    sb_write_file(cal_path, &calendar);
+    sb_write_to_file(cal_path, &calendar);
   }
 
-  sb_write_file(cals_path, &cals);
+  sb_write_to_file(cals_path, &cals);
 
   sb_free(&urls);
   sb_free(&cals);
@@ -411,11 +402,19 @@ int main(int argc, char **argv) {
     sb_t cal_file = { 0 };
 
     const char* calname = arena_sprintf(&arena, "%.*s", SLICE_FMT(*cal_fn));
+    LOG_DEBUG("Reading file %s.", calname);
     sb_read_file(calname, &cal_file);
+    if (cal_file.count == 0 || cal_file.items == NULL) {
+      LOG_ERROR("Failed to read file %s.", calname);
+      continue;
+    }
 
     calendar_t calendar = { 0 };
 
-    if(parse_calendar(&arena, &cal_file, calname, &calendar)) return 1;
+    if(parse_calendar(&arena, &cal_file, calname, &calendar)) { 
+      LOG_ERROR("Failed to parse calendar %s.", calname);
+      continue;
+    }
 
     LOG_DEBUG("Calendar %s (%s), %zu total events.", calendar.name, calname, calendar.events.count);
     da_foreach(event_t, e, &calendar.events) {
