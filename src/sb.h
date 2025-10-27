@@ -245,7 +245,7 @@ int sb_write_to_file(const char *filename, sb_t* sb) {
 
 #ifdef _WIN32
   DeleteFileA(filename);
-  HANDLE hFile = CreateFileA(filename, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL);
+  HANDLE hFile = CreateFileA(filename, FILE_WRITE_DATA, 0, NULL, OPEN_ALWAYS, 0, NULL);
   if (hFile == INVALID_HANDLE_VALUE) return -1;
 
   if (!WriteFile(hFile, (LPCVOID)sb->items, (DWORD)sb->count, (LPDWORD)&written, NULL)) return -1;
@@ -268,7 +268,7 @@ int sb_append_to_file(const char *filename, sb_t* sb) {
   int written = 0;
 
 #ifdef _WIN32
-  HANDLE hFile = CreateFileA(filename, FILE_GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE hFile = CreateFileA(filename, FILE_APPEND_DATA , 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (hFile == INVALID_HANDLE_VALUE) return -1;
 
   if (!WriteFile(hFile, (LPCVOID)sb->items, (DWORD)sb->count, (LPDWORD)&written, NULL)) return -1;
