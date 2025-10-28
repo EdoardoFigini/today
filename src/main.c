@@ -395,9 +395,49 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
   return 0;
 }
 
-// TODO: check for duplicates
+int delete(const char* url, const char* urls_path) {
+  sb_t sb = { 0 };
+  sb_t urls = { 0 };
+
+  slicearr_t lines = { 0 };
+  if (sb_read_file(urls_path, &urls) > 0) {
+    slice_t urls_slice = { .data = urls.items, .size = urls.count };
+    split(&urls_slice, "\n", 0, &lines);
+    da_foreach(slice_t, s, &lines) {
+      slice_trim(s);
+
+      if (!slice_eq(s, url)) {
+        sb_appendf(&sb, "%.*s\n", SLICE_FMT(*s));
+      }
+    }
+  }
+
+  if (sb_write_to_file(urls_path, &sb) < 0) {
+    LOG_ERROR("Failed to write to file `%s`.", urls_path);
+    return 1;
+  }
+
+  return 0;
+}
+
 int add(const char* url, const char* urls_path) {
   sb_t sb = { 0 };
+  sb_t urls = { 0 };
+
+  // check for duplicates
+  slicearr_t lines = { 0 };
+  if (sb_read_file(urls_path, &urls) > 0) {
+    slice_t urls_slice = { .data = urls.items, .size = urls.count };
+    split(&urls_slice, "\n", 0, &lines);
+    da_foreach(slice_t, s, &lines) {
+      slice_trim(s);
+
+      if (slice_eq(s, url)) {
+        LOG_INFO("URL `%s` already added.", url);
+        return 0;
+      }
+    }
+  }
 
   sb_appendln(&sb, url);
   if (sb_append_to_file(urls_path, &sb) < 0) {
@@ -442,6 +482,10 @@ int main(int argc, char **argv) {
     int set;
     const char* url;
   } f_add = { 0 };
+  struct {
+    int set;
+    const char* url;
+  } f_del = { 0 };
 
   char* arg = shift(argc, argv);
   while (arg) {
@@ -455,6 +499,13 @@ int main(int argc, char **argv) {
         return 1;
       }
       f_add.set = 1;
+    } else if (strcmp(arg, "--delete") == 0 || strcmp(arg, "-d") == 0) {
+      f_del.url = shift(argc, argv);
+      if (!f_del.url || *f_del.url == '-') {
+        LOG_ERROR("Expected <url> after --delete option.");
+        return 1;
+      }
+      f_del.set = 1;
     } else if (strcmp(arg, "--refresh") == 0 || strcmp(arg, "-r") == 0) {
       f_refresh = 1;
     } else {
@@ -472,11 +523,16 @@ int main(int argc, char **argv) {
     fprintf(stdout, "\t--help     -h        Shows this message and exits with 0.\n");
     fprintf(stdout, "\t--refresh  -r        Refreshes all the calendars.\n");
     fprintf(stdout, "\t--add      -a <url>  Adds <url> to the list of calendars.\n");
+    fprintf(stdout, "\t--delete   -d <url>  Deletes <url> to the list of calendars.\n");
     return 0;
   }
 
   if (f_add.set) {
     if(add(f_add.url, urls_fn)) return 1;
+  }
+
+  if (f_del.set) {
+    if(delete(f_del.url, urls_fn)) return 1;
   }
 
   if (f_refresh) {
