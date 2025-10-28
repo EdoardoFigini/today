@@ -8,6 +8,11 @@
 #define WIN32_MEAN_AND_LEAN
 #include <windows.h>
 #include <wininet.h>
+#include <userenv.h>
+
+#define OS_SEP "\\"
+#else
+#define OS_SEP  "/"
 #endif
 
 #define SB_IMPLEMENTATION
@@ -20,6 +25,9 @@
 #include "logging.h"
 #include "timestamp.h"
 #include "slice.h"
+
+#define TODAY_DIR ".today"
+#define MAX_USRDIR_PATH 260
 
 typedef struct {
   size_t dtstamp;
@@ -51,6 +59,55 @@ typedef enum {
   STATE_EVENT,
   STATE_OTHER,
 } parse_state_t;
+
+#ifdef _WIN32
+CHAR *helper_win32_error_message(DWORD err) {
+  static CHAR szErrMsg[4096] = {0};
+
+  DWORD dwErrMsgSize = FormatMessageA(
+    FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+    NULL,
+    err,
+    LANG_USER_DEFAULT,
+    szErrMsg,
+    4096,
+    NULL
+  );
+
+  if (dwErrMsgSize == 0) {
+    if (GetLastError() != ERROR_MR_MID_NOT_FOUND) {
+      if (sprintf(szErrMsg, "Could not get error message for 0x%lX", err) > 0) {
+        return (CHAR *)&szErrMsg;
+      } 
+    } else {
+      if (sprintf(szErrMsg, "Invalid Windows Error code (0x%lX)", err) > 0) {
+        return (CHAR *)&szErrMsg;
+      }
+    }
+    return NULL;
+  }
+
+  while (dwErrMsgSize > 1 && isspace(szErrMsg[dwErrMsgSize - 1])) {
+    szErrMsg[--dwErrMsgSize] = '\0';
+  }
+
+  return szErrMsg;
+}
+#endif
+
+
+char* get_full_path(arena_t* arena, const char* filename) {
+  char userdir[MAX_USRDIR_PATH] = { 0 };
+
+#ifdef _WIN32
+  if (!GetEnvironmentVariableA("USERPROFILE", userdir, sizeof(userdir))) {
+    LOG_ERROR("Failed to get USERPROFILE: 0x%lX (%s)", GetLastError(), helper_win32_error_message(GetLastError()));
+    return NULL;
+  }
+#endif
+
+  return arena_sprintf(arena, "%s" OS_SEP "%s" OS_SEP "%s", userdir, TODAY_DIR, filename);
+}
 
 
 int parse_calendar(arena_t* arena, sb_t* cal, const char* filename, calendar_t* calendar) {
@@ -289,7 +346,11 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
 
   sb_t calendar = { 0 };
 
-  sb_read_file(urls_path, &urls);
+  if(sb_read_file(urls_path, &urls) < 0) {
+    LOG_ERROR("Failed to read file `%s`", urls_path);
+    return -1;
+  }
+
   slice_t cal_slice = { .data = urls.items, .size = urls.count };
   slicearr_t lines = { 0 };
   split(&cal_slice, "\n", 0, &lines);
@@ -313,12 +374,20 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
     if (cal_name == NULL) {
       LOG_WARN("Could not find name for `%.*s`", SLICE_FMT(url));
     }
-    char* cal_path = arena_sprintf(arena, "%s.ics", cal_name); 
+    char* cal_path = get_full_path(arena, arena_sprintf(arena, "calendars" OS_SEP "%s.ics", cal_name)); 
     sb_appendln(&cals, cal_path);
-    sb_write_to_file(cal_path, &calendar);
+    if (sb_write_to_file(cal_path, &calendar) < 0) {
+      LOG_ERROR("Failed to write to file `%s`.", cal_path);
+      continue;
+    }
   }
 
-  sb_write_to_file(cals_path, &cals);
+  if (sb_write_to_file(cals_path, &cals) < 0) {
+    LOG_ERROR("Failed to write to file `%s`.", cals_path);
+    sb_free(&urls);
+    sb_free(&cals);
+    return 1;
+  }
 
   sb_free(&urls);
   sb_free(&cals);
@@ -326,12 +395,29 @@ int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
   return 0;
 }
 
+// TODO: check for duplicates
 int add(const char* url, const char* urls_path) {
   sb_t sb = { 0 };
 
   sb_appendln(&sb, url);
-  if (sb_append_to_file(urls_path, &sb) <= 0) return 1;
+  if (sb_append_to_file(urls_path, &sb) < 0) {
+    LOG_ERROR("Failed to append to file `%s`.", urls_path);
+    return 1;
+  }
 
+  return 0;
+}
+
+int create_dir(const char* dirname) {
+#ifdef _WIN32
+  if(!CreateDirectoryA(dirname, NULL)) {
+    DWORD err = GetLastError();
+    if (err != ERROR_ALREADY_EXISTS) { 
+      LOG_ERROR("Failed to create directory `%s`: 0x%lX (%s)", dirname, err, helper_win32_error_message(err));
+      return 1;
+    }
+  }
+#endif
   return 0;
 }
 
@@ -339,9 +425,14 @@ int add(const char* url, const char* urls_path) {
 
 int main(int argc, char **argv) {
   arena_t arena = { 0 };
+  
+  if(create_dir(get_full_path(&arena, ""))) return 1;
+  if(create_dir(get_full_path(&arena, "calendars"))) return 1;
 
-  const char* urls_fn = "urls";
-  const char* cals_fn = "cals";
+  const char* urls_fn = get_full_path(&arena, "urls");
+  const char* cals_fn = get_full_path(&arena, "cals");
+
+  if (!urls_fn || !cals_fn) return 1;
 
   const char* program = shift(argc, argv);
   // fprintf(stderr, "%s\n", program);
@@ -359,7 +450,7 @@ int main(int argc, char **argv) {
       f_help = 1;
     else if (strcmp(arg, "--add") == 0 || strcmp(arg, "-a") == 0) {
       f_add.url = shift(argc, argv);
-      if (!f_add.url) {
+      if (!f_add.url || *f_add.url == '-') {
         LOG_ERROR("Expected <url> after --add option.");
         return 1;
       }
@@ -393,7 +484,10 @@ int main(int argc, char **argv) {
   }
 
   sb_t cals_fnames = { 0 };
-  sb_read_file(cals_fn, &cals_fnames);
+  if(sb_read_file(cals_fn, &cals_fnames) < 0) {
+   LOG_ERROR("Failed to read file `%s`", cals_fn); 
+   return 1;
+  }
 
   slicearr_t cals = { 0 };
   slice_t cals_fnames_slice = { .data = cals_fnames.items, .size = cals_fnames.count }; 
@@ -408,9 +502,12 @@ int main(int argc, char **argv) {
 
     const char* calname = arena_sprintf(&arena, "%.*s", SLICE_FMT(*cal_fn));
     LOG_DEBUG("Reading file %s.", calname);
-    sb_read_file(calname, &cal_file);
+    if(sb_read_file(calname, &cal_file) < 0) {
+      LOG_ERROR("Failed to read file `%s`.", calname); 
+      continue;
+    }
     if (cal_file.count == 0 || cal_file.items == NULL) {
-      LOG_ERROR("Failed to read file %s.", calname);
+      LOG_ERROR("Failed to read file `%s`.", calname);
       continue;
     }
 
@@ -518,6 +615,8 @@ int main(int argc, char **argv) {
       }
     }
   }
+
+  arena_free(&arena);
 
   return 0;
 }
