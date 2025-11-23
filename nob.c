@@ -6,9 +6,11 @@
 #ifdef _WIN32
 #define OS_SEP "\\"
 #define EXE_EXT ".exe"
+#define OBJ_EXT ".obj"
 #else
 #define OS_SEP "/"
 #define EXE_EXT
+#define OBJ_EXT ".o"
 #endif
 
 #define BUILD_DIR "build" OS_SEP
@@ -35,7 +37,7 @@ int main(int argc, char **argv) {
   nob_da_foreach(const char*, s, &sources) {
     if (memcmp(".c", *s + strlen(*s) - 2, 2) != 0) continue;
     nob_cc(&cmd);
-    const char* obj_path = nob_temp_sprintf(BUILD_DIR "%s.obj", *s);
+    const char* obj_path = nob_temp_sprintf(BUILD_DIR "%s" OBJ_EXT, *s);
 #if defined(_MSC_VER)
     nob_cmd_append(&cmd,"/nologo");
     nob_cmd_append(&cmd,"/W4");

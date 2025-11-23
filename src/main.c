@@ -12,6 +12,14 @@
 
 #define OS_SEP "\\"
 #else
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <errno.h>
+
 #define OS_SEP  "/"
 #endif
 
@@ -97,13 +105,16 @@ CHAR *helper_win32_error_message(DWORD err) {
 
 
 char* get_full_path(arena_t* arena, const char* filename) {
+#ifdef _WIN32
   char userdir[MAX_USRDIR_PATH] = { 0 };
 
-#ifdef _WIN32
   if (!GetEnvironmentVariableA("USERPROFILE", userdir, sizeof(userdir))) {
     LOG_ERROR("Failed to get USERPROFILE: 0x%lX (%s)", GetLastError(), helper_win32_error_message(GetLastError()));
     return NULL;
   }
+#else
+  char* userdir = getenv("HOME");
+  if(!userdir) return NULL;
 #endif
 
   return arena_sprintf(arena, "%s" OS_SEP "%s" OS_SEP "%s", userdir, TODAY_DIR, filename);
@@ -259,6 +270,10 @@ int http_get(slice_t* url, sb_t* out) {
   url_structure.count = 0;
   split(&url_path, "/", 1, &url_structure);
 
+  const char* agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+
+  char buffer[4096];
+
 #ifdef _WIN32
   // TODO: support HTTPS
   if (schema != 0) {
@@ -277,7 +292,7 @@ int http_get(slice_t* url, sb_t* out) {
   HINTERNET hRequest  = NULL;
 
   hInternet = InternetOpenA(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+    agent,
     INTERNET_OPEN_TYPE_DIRECT,
     NULL,
     NULL,
@@ -318,7 +333,6 @@ int http_get(slice_t* url, sb_t* out) {
   );
   if (!res) return 1;
 
-  BYTE buffer[4096];
   DWORD dwRead = 0;
   do {
     dwRead = 0;
@@ -336,8 +350,71 @@ int http_get(slice_t* url, sb_t* out) {
 
   return 0;
 #else
-  return 1;
-#endif // platform
+  // TODO: support HTTPS
+  if (schema != 0) {
+    LOG_ERROR("HTTPS not supported yet, falling back to HTTP");
+    schema = 0;
+  }
+
+  char* host = malloc(url_structure.items[0].size + 1);
+  char* obj  = malloc(url_structure.items[1].size + 1);
+  memcpy(host, url_structure.items[0].data, url_structure.items[0].size);
+  memcpy(obj,  url_structure.items[1].data, url_structure.items[1].size);
+
+  struct sockaddr_in servaddr = { 0 };
+  
+  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd == -1) return 1; 
+
+  int pton_result = inet_pton(AF_INET, host, &servaddr.sin_addr);
+
+  if (pton_result == 0) {
+    struct hostent *server = gethostbyname(host);
+    if (server == NULL) {
+      close(sockfd);
+      return 1; 
+    }
+    memcpy(&servaddr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
+  }
+
+  servaddr.sin_family = AF_INET;
+  servaddr.sin_port = htons(schema ? 443 : 80);
+
+  if (connect(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) {
+    return 1;
+  }
+
+  const char* req_fmt = 
+    "GET /%s HTTP/1.1\r\n"
+    "Host: %s\r\n"
+    "User-Agent: %s\r\n"
+    "Accept: text/calendar\r\n"
+    "Cache-Control: no-cache\r\n"
+    "Pragma: no-cache\r\n"
+    "\r\n";
+
+  size_t req_size = snprintf(NULL, 0, req_fmt, obj, host, agent);
+  char* req = malloc(req_size + 1);
+  req_size = snprintf(req, req_size + 1, req_fmt, obj, host, agent);
+
+  printf("%s\n", req);
+
+  if(send(sockfd, req, req_size, 0) < 0) return 1;
+
+  recv(sockfd, buffer, sizeof(buffer), MSG_WAITALL);
+  printf("%.*s\n", sizeof(buffer), buffer);
+
+  // do {
+  //   size_t n = recv(sockfd, buffer, sizeof(buffer), 0);
+  //   if (n <= 0) break;
+  //
+  //   sb_n_append(out, (const char*)buffer, n);
+  // } while (strstr(buffer, "\r\n\r\n") != NULL);
+
+  free(host);
+  free(obj);
+  return 0;
+#endif
 }
 
 int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
@@ -457,6 +534,31 @@ int create_dir(const char* dirname) {
       return 1;
     }
   }
+#else
+  struct stat st = { 0 };
+
+  if (!stat(dirname, &st)) return 0;
+  if (mkdir(dirname, 0777)) {
+    LOG_ERROR("Failed to create directory `%s`: %d (%s)", dirname, errno, strerror(errno));
+    return 1;
+  }
+#endif
+  return 0;
+}
+
+int create_file_if_not_exists(const char* filepath) {
+#ifdef _WIN32
+#else
+  struct stat st = { 0 };
+
+  if (!stat(filepath, &st)) return 0;
+
+  FILE* fp = fopen(filepath, "w");
+  if (!fp) {
+    LOG_ERROR("Failed to create file `%s`: %d (%s)", filepath, errno, strerror(errno));
+    return 1;
+  }
+  fclose(fp);
 #endif
   return 0;
 }
@@ -473,6 +575,9 @@ int main(int argc, char **argv) {
   const char* cals_fn = get_full_path(&arena, "cals");
 
   if (!urls_fn || !cals_fn) return 1;
+
+  if(create_file_if_not_exists(urls_fn)) return 1;
+  if(create_file_if_not_exists(cals_fn)) return 1;
 
   const char* program = shift(argc, argv);
   // fprintf(stderr, "%s\n", program);
@@ -529,6 +634,8 @@ int main(int argc, char **argv) {
 
   if (f_add.set) {
     if(add(f_add.url, urls_fn)) return 1;
+    // force refresh
+    if(refresh(&arena, cals_fn, urls_fn)) return 1;
   }
 
   if (f_del.set) {
