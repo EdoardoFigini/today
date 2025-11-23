@@ -336,7 +336,7 @@ int http_get(slice_t* url, sb_t* out) {
 
   return 0;
 #else
-  return 1;/
+  return 1;
 #endif // platform
 }
 
@@ -523,7 +523,7 @@ int main(int argc, char **argv) {
     fprintf(stdout, "\t--help     -h        Shows this message and exits with 0.\n");
     fprintf(stdout, "\t--refresh  -r        Refreshes all the calendars.\n");
     fprintf(stdout, "\t--add      -a <url>  Adds <url> to the list of calendars.\n");
-    fprintf(stdout, "\t--delete   -d <url>  Deletes <url> to the list of calendars.\n");
+    fprintf(stdout, "\t--delete   -d <url>  Deletes <url> from the list of calendars.\n");
     return 0;
   }
 

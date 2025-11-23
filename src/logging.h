@@ -49,7 +49,11 @@
 #define LOG_FATAL(fmt, ...) __LOG(FATAL, fmt, ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) __LOG(ERROR, fmt, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...)  __LOG(WARN, fmt, ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...) __LOG(DEBUG, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...)  __LOG(INFO,  fmt, ##__VA_ARGS__)
+#ifdef NDEBUG
+#define LOG_DEBUG(fmt, ...)
+#else
+#define LOG_DEBUG(fmt, ...) __LOG(DEBUG, fmt, ##__VA_ARGS__)
+#endif
 
 #endif // LOGGING_H
