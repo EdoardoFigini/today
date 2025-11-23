@@ -3,3 +3,6 @@ build/
 
 *.exe
 *.obj
+nob*
+!nob.c
+!nob.h

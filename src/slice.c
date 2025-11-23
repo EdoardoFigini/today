@@ -37,7 +37,7 @@ int slice_atoi(slice_t *s) {
 }
 
 void slice_trim_start(slice_t* s) {
-  int i = 0;
+  size_t i = 0;
   while(i < s->size && isspace(s->data[i])) {
     s->size--;
     s->data++;

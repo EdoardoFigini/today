@@ -1,6 +1,8 @@
 #ifndef _SLICE_H
 #define _SLICE_H
 
+#include <stddef.h>
+
 typedef struct {
   char* data;
   size_t size;
