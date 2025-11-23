@@ -5,6 +5,8 @@
 #include <windows.h>
 
 #define TO_SECS(x) (x) / ( 1000 * 1000 * 10 )
+#else
+#include <time.h>
 #endif
 
 typedef struct {

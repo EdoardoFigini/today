@@ -16,6 +16,18 @@ timestamp_t now() {
     .mm = st.wMinute,
     .ss = st.wSecond,
   };
+#else
+  time_t t;
+  time(&t);
+  struct tm *tm = localtime(&t);
+  return (timestamp_t) {
+    .y = tm->tm_year + 1900,
+    .m = tm->tm_mon + 1,
+    .d = tm->tm_mday,
+    .hh = tm->tm_hour,
+    .mm = tm->tm_min,
+    .ss = tm->tm_sec,
+  };
 #endif
 }
 
@@ -28,6 +40,15 @@ timestamp_t today_00() {
     .m = st.wMonth,
     .d = st.wDay,
   };
+#else
+  time_t t;
+  time(&t);
+  struct tm *tm = localtime(&t);
+  return (timestamp_t) {
+    .y = tm->tm_year + 1900,
+    .m = tm->tm_mon + 1,
+    .d = tm->tm_mday,
+  };
 #endif
 }
 
@@ -39,6 +60,18 @@ timestamp_t today_24() {
     .y = st.wYear,
     .m = st.wMonth,
     .d = st.wDay,
+    .hh = 23,
+    .mm = 59,
+    .ss = 59
+  };
+#else
+  time_t t;
+  time(&t);
+  struct tm *tm = localtime(&t);
+  return (timestamp_t) {
+    .y = tm->tm_year + 1900,
+    .m = tm->tm_mon + 1,
+    .d = tm->tm_mday,
     .hh = 23,
     .mm = 59,
     .ss = 59
@@ -64,6 +97,19 @@ SYSTEMTIME timestamp_to_systime(timestamp_t t) {
   FileTimeToSystemTime(&ft, &local);
   return local;
 }
+#else
+time_t timestamp_to_systime(timestamp_t t) {
+  struct tm tm = { 0 };
+  tm.tm_year = t.y - 1900;
+  tm.tm_mon  = t.m - 1;
+  tm.tm_mday = t.d;
+  tm.tm_hour = t.hh;
+  tm.tm_min  = t.mm;
+  tm.tm_sec  = t.ss;
+  tm.tm_isdst = -1;
+
+  return mktime(&tm);
+}
 #endif
 
 int64_t timestamp_cmp(timestamp_t a, timestamp_t b) {
@@ -87,6 +133,13 @@ int64_t timestamp_cmp(timestamp_t a, timestamp_t b) {
   };
 
   return lia.QuadPart - lib.QuadPart;
+#else
+  time_t sta = timestamp_to_systime(a);
+  time_t stb = timestamp_to_systime(b);
+
+  if (sta == (time_t)-1 || stb == (time_t)-1) return -INT64_MAX;
+
+  return (int64_t)sta - (int64_t)stb;
 #endif
 }
 
@@ -94,8 +147,15 @@ void timestamp_day_print(timestamp_t t) {
 #ifdef _WIN32
   PCSTR dn[] = { "Sunday", "Monday", "Tuesday", 
   "Wednesday", "Thursday", "Friday", "Saturday" };
-  // FIXME: only on Windows
   printf("%s - %d/%d/%d", dn[timestamp_to_systime(t).wDayOfWeek], t.d, t.m, t.y);
+#else
+  time_t stt = timestamp_to_systime(t);
+  struct tm *tm = localtime(&stt);
+
+  char buf[256];
+  size_t len = strftime(buf, sizeof(buf), "%A - %d/%m/%Y", tm);
+  if(len > 0)
+    printf("%s", buf);
 #endif
 }
 
