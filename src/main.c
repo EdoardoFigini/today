@@ -20,6 +20,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #define OS_SEP  "/"
 #endif
 
@@ -350,14 +353,10 @@ int http_get(slice_t* url, sb_t* out) {
 
   return 0;
 #else
-  // TODO: support HTTPS
-  if (schema != 0) {
-    LOG_ERROR("HTTPS not supported yet, falling back to HTTP");
-    schema = 0;
-  }
-
   char* host = malloc(url_structure.items[0].size + 1);
   char* obj  = malloc(url_structure.items[1].size + 1);
+  memset(host, 0, url_structure.items[0].size + 1);
+  memset(obj,  0, url_structure.items[1].size + 1);
   memcpy(host, url_structure.items[0].data, url_structure.items[0].size);
   memcpy(obj,  url_structure.items[1].data, url_structure.items[1].size);
 
@@ -372,6 +371,7 @@ int http_get(slice_t* url, sb_t* out) {
     struct hostent *server = gethostbyname(host);
     if (server == NULL) {
       close(sockfd);
+      LOG_ERROR("Failed to resolve host `%s`.", host);
       return 1; 
     }
     memcpy(&servaddr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
@@ -380,8 +380,22 @@ int http_get(slice_t* url, sb_t* out) {
   servaddr.sin_family = AF_INET;
   servaddr.sin_port = htons(schema ? 443 : 80);
 
-  if (connect(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) {
-    return 1;
+  if (connect(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) return 1;
+  SSL* ssl = NULL;
+  if (schema) {
+    SSL_CTX* ctx = SSL_CTX_new(TLS_method());
+    if (!ctx) return 1;
+    ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); return 1;}
+
+    if (!SSL_set_tlsext_host_name(ssl, host)) {
+      SSL_free(ssl);
+      SSL_CTX_free(ctx);
+      return 1;
+    }
+
+    if (!SSL_set_fd(ssl, sockfd)) return 1;
+    if (!SSL_connect(ssl)) return 1;
   }
 
   const char* req_fmt = 
@@ -391,28 +405,95 @@ int http_get(slice_t* url, sb_t* out) {
     "Accept: text/calendar\r\n"
     "Cache-Control: no-cache\r\n"
     "Pragma: no-cache\r\n"
+    "Connection: close\r\n"
     "\r\n";
 
   size_t req_size = snprintf(NULL, 0, req_fmt, obj, host, agent);
   char* req = malloc(req_size + 1);
   req_size = snprintf(req, req_size + 1, req_fmt, obj, host, agent);
 
-  printf("%s\n", req);
-
-  if(send(sockfd, req, req_size, 0) < 0) return 1;
-
-  recv(sockfd, buffer, sizeof(buffer), MSG_WAITALL);
-  printf("%.*s\n", sizeof(buffer), buffer);
-
-  // do {
-  //   size_t n = recv(sockfd, buffer, sizeof(buffer), 0);
-  //   if (n <= 0) break;
-  //
-  //   sb_n_append(out, (const char*)buffer, n);
-  // } while (strstr(buffer, "\r\n\r\n") != NULL);
-
   free(host);
   free(obj);
+
+  printf("%s\n", req);
+
+  switch (schema){
+    case 0:
+      if(send(sockfd, req, req_size, 0) < 0) return 1;
+      break;
+    case 1:
+      if(SSL_write(ssl, req, req_size) < 0) return 1;
+      break;
+  }
+
+  // parse headers
+  sb_t headers = { 0 };
+  char* terminator = NULL;
+  size_t headers_length = 0;
+  size_t n = 0;
+  do {
+    switch (schema){
+      case 0:
+        n = recv(sockfd, buffer, sizeof(buffer), 0);
+        break;
+      case 1:
+        n = SSL_read(ssl, buffer, sizeof(buffer));
+        break;
+    }
+    if (n <= 0) break;
+
+    terminator = strstr(buffer, "\r\n\r\n");
+    if (terminator) {
+      headers_length = (uintptr_t)terminator - (uintptr_t)buffer;
+      sb_n_append(&headers, (const char*)buffer, headers_length);
+    } else 
+      sb_n_append(&headers, (const char*)buffer, n);
+  } while (terminator == NULL);
+
+  int content_length = 0;
+
+  slicearr_t h_lines = { 0 };
+  slice_t h_slice = { .data = headers.items, .size = headers.size };
+  split(&h_slice, "\r\n", 0, &h_lines);
+
+  da_foreach(slice_t, l, &h_lines) {
+    slice_trim(l);
+    slicearr_t kv_pair = { 0 };
+    split(l, ":", 1, &kv_pair);
+
+    if (kv_pair.count < 2) continue;
+  
+    slice_trim(&kv_pair.items[0]);
+    slice_trim(&kv_pair.items[1]);
+
+    if(slice_eq(&kv_pair.items[0], "Content-Length"))
+      content_length = slice_atoi(&kv_pair.items[1]);
+  }
+
+  if (content_length == 0) {
+    LOG_ERROR("Could not read body");
+    return 1;
+  }
+
+  sb_n_append(out, buffer + headers_length, sizeof(buffer) - headers_length);
+
+  size_t to_read = content_length;
+  while(to_read > 0) {
+    switch (schema) {
+      case 0:
+        n = recv(sockfd, buffer, sizeof(buffer), 0);
+        break;
+      case 1:
+        n = SSL_read(ssl, buffer, sizeof(buffer));
+        break;
+    }
+    if (n <= 0) break;
+
+    sb_n_append(out, buffer, n);
+
+    to_read = to_read > n ? to_read - n : 0;
+  }
+
   return 0;
 #endif
 }

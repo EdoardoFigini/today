@@ -51,6 +51,7 @@ int main(int argc, char **argv) {
     nob_cmd_append(&cmd,"-Wall");
     nob_cmd_append(&cmd,"-Wextra");
     nob_cmd_append(&cmd,"-g3");
+    nob_cmd_append(&cmd,"-I/usr/local/ssl/include");
     nob_cmd_append(&cmd,"-o");
     nob_cmd_append(&cmd,nob_temp_sprintf("%s", obj_path));
     nob_cmd_append(&cmd,"-c");
@@ -80,6 +81,11 @@ int main(int argc, char **argv) {
   nob_da_foreach(const char*, o, &objects) {
     nob_cmd_append(&cmd, *o);
   }
+#if defined(__GNUC__) || defined(__MINGW32__)
+  nob_cmd_append(&cmd,"-L/usr/local/ssl/lib64");
+  nob_cmd_append(&cmd,"-lssl");
+  nob_cmd_append(&cmd,"-lcrypto");
+#endif
   if (!nob_cmd_run(&cmd)) return 1;
 
   return 0;
