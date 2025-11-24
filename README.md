@@ -7,6 +7,10 @@ Small CLI calendar client application.
 
 Clone this repository and compile from source.
 
+### Requirements
+
+On Linux `today` depends on [openssl](https://github.com/openssl/openssl).
+
 ### Compilation
 
 This application uses the [nob](https://github.com/tsoding/nob.h) build system.
