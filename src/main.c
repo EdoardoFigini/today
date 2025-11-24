@@ -249,10 +249,17 @@ char* get_cal_name(arena_t* arena, sb_t* cal) {
 }
 
 int qsort_event_cmp(const void* e1, const void* e2) {
+#ifdef _WIN32
+  // FIXME: shouldn't invert
   return (int)-timestamp_cmp(((event_t*)e1)->dtstart, ((event_t*)e2)->dtstart);
+#else
+  return (int) timestamp_cmp(((event_t*)e1)->dtstart, ((event_t*)e2)->dtstart);
+#endif
 }
 
 int http_get(slice_t* url, sb_t* out) {
+  arena_t arena = { 0 };
+    
   out->count = 0;
   slicearr_t url_structure = { 0 };
   split(url, "//", 1, &url_structure);
@@ -351,14 +358,9 @@ int http_get(slice_t* url, sb_t* out) {
     // LOG_INFO("extended output to %zu bytes (%lu read).", out->count, dwRead);
   } while (res && dwRead > 0);
 
-  return 0;
 #else
-  char* host = malloc(url_structure.items[0].size + 1);
-  char* obj  = malloc(url_structure.items[1].size + 1);
-  memset(host, 0, url_structure.items[0].size + 1);
-  memset(obj,  0, url_structure.items[1].size + 1);
-  memcpy(host, url_structure.items[0].data, url_structure.items[0].size);
-  memcpy(obj,  url_structure.items[1].data, url_structure.items[1].size);
+  char* host = arena_sprintf(&arena, "%.*s", SLICE_FMT(url_structure.items[0]));
+  char* obj = arena_sprintf(&arena, "%.*s", SLICE_FMT(url_structure.items[1]));
 
   struct sockaddr_in servaddr = { 0 };
   
@@ -408,21 +410,14 @@ int http_get(slice_t* url, sb_t* out) {
     "Connection: close\r\n"
     "\r\n";
 
-  size_t req_size = snprintf(NULL, 0, req_fmt, obj, host, agent);
-  char* req = malloc(req_size + 1);
-  req_size = snprintf(req, req_size + 1, req_fmt, obj, host, agent);
-
-  free(host);
-  free(obj);
-
-  printf("%s\n", req);
+  const char* req = arena_sprintf(&arena, req_fmt, obj, host, agent);
 
   switch (schema){
     case 0:
-      if(send(sockfd, req, req_size, 0) < 0) return 1;
+      if(send(sockfd, req, strlen(req), 0) < 0) return 1;
       break;
     case 1:
-      if(SSL_write(ssl, req, req_size) < 0) return 1;
+      if(SSL_write(ssl, req, strlen(req)) < 0) return 1;
       break;
   }
 
@@ -456,7 +451,21 @@ int http_get(slice_t* url, sb_t* out) {
   slice_t h_slice = { .data = headers.items, .size = headers.size };
   split(&h_slice, "\r\n", 0, &h_lines);
 
-  da_foreach(slice_t, l, &h_lines) {
+  slicearr_t status_line = { 0 };
+  split(&h_lines.items[0], " ", 2, &status_line);
+  if (status_line.count < 3) return 1;
+
+  int status = slice_atoi(&status_line.items[1]);
+  slice_t msg = status_line.items[2];
+
+  if (status != 200) {
+    LOG_ERROR("HTTP request returned: %d %.*s", status, SLICE_FMT(msg));
+    return 1;
+  }
+
+  for(size_t i = 1; i < h_lines.count; i++) { 
+    slice_t* l = h_lines.items + i;
+
     slice_trim(l);
     slicearr_t kv_pair = { 0 };
     split(l, ":", 1, &kv_pair);
@@ -475,7 +484,7 @@ int http_get(slice_t* url, sb_t* out) {
     return 1;
   }
 
-  sb_n_append(out, buffer + headers_length, sizeof(buffer) - headers_length);
+  sb_n_append(out, buffer + (headers_length % sizeof(buffer)), sizeof(buffer) - (headers_length % sizeof(buffer)));
 
   size_t to_read = content_length;
   while(to_read > 0) {
@@ -493,9 +502,11 @@ int http_get(slice_t* url, sb_t* out) {
 
     to_read = to_read > n ? to_read - n : 0;
   }
+#endif
+
+  arena_free(&arena);
 
   return 0;
-#endif
 }
 
 int refresh(arena_t* arena, const char* cals_path, const char* urls_path) {
