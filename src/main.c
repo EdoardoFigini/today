@@ -260,7 +260,7 @@ int qsort_event_cmp(const void* e1, const void* e2) {
 int http_get(slice_t* url, sb_t* out) {
   arena_t arena = { 0 };
     
-  out->count = 0;
+  if(out) out->count = 0;
   slicearr_t url_structure = { 0 };
   split(url, "//", 1, &url_structure);
   if (url_structure.count < 2) {
@@ -354,7 +354,7 @@ int http_get(slice_t* url, sb_t* out) {
     );
     if (!res) return 1;
 
-    sb_n_append(out, (const char*)buffer, dwRead);
+    if(out) sb_n_append(out, (const char*)buffer, dwRead);
     // LOG_INFO("extended output to %zu bytes (%lu read).", out->count, dwRead);
   } while (res && dwRead > 0);
 
@@ -484,7 +484,8 @@ int http_get(slice_t* url, sb_t* out) {
     return 1;
   }
 
-  sb_n_append(out, buffer + (headers_length % sizeof(buffer)), sizeof(buffer) - (headers_length % sizeof(buffer)));
+  if(out)
+    sb_n_append(out, buffer + (headers_length % sizeof(buffer)), sizeof(buffer) - (headers_length % sizeof(buffer)));
 
   size_t to_read = content_length;
   while(to_read > 0) {
@@ -498,7 +499,8 @@ int http_get(slice_t* url, sb_t* out) {
     }
     if (n <= 0) break;
 
-    sb_n_append(out, buffer, n);
+    if(out)
+      sb_n_append(out, buffer, n);
 
     to_read = to_read > n ? to_read - n : 0;
   }
@@ -725,6 +727,11 @@ int main(int argc, char **argv) {
   }
 
   if (f_add.set) {
+    slice_t url = { (char*)f_add.url, strlen(f_add.url) };
+    if(http_get(&url, NULL)) {
+      LOG_ERROR("Invalid URL");
+      return 1;
+    }
     if(add(f_add.url, urls_fn)) return 1;
     // force refresh
     if(refresh(&arena, cals_fn, urls_fn)) return 1;
