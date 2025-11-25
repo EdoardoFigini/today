@@ -657,6 +657,35 @@ int create_file_if_not_exists(const char* filepath) {
   return 0;
 }
 
+int delete_file(const char* filepath) {
+#ifdef _WIN32
+  if(!DeleteFileA(filepath)) {
+    LOG_ERROR("Failed to delete file `%s`: 0x%lX (%s)", dirname, err, helper_win32_error_message(err));
+    return 1;
+  }
+#else
+  struct stat st = { 0 };
+  if (stat(filepath, &st)) return 0;
+
+  if(remove(filepath)) {
+    LOG_ERROR("Failed to delete file `%s`: %d (%s)", filepath, errno, strerror(errno));
+    return 1;
+  }
+#endif
+  return 0;
+}
+
+int reset(const char* urls_fn, const char* cals_fn) {
+  arena_t arena = { 0 };
+  if(delete_file(urls_fn)) return 1;
+  if(delete_file(cals_fn)) return 1;
+  // TODO: recursively delete .today/calendars
+
+  arena_free(&arena);
+
+  return 0;
+}
+
 #define shift(argc, argv) (argc-- > 0 ? *(argv++) : NULL);
 
 int main(int argc, char **argv) {
@@ -670,13 +699,11 @@ int main(int argc, char **argv) {
 
   if (!urls_fn || !cals_fn) return 1;
 
-  if(create_file_if_not_exists(urls_fn)) return 1;
-  if(create_file_if_not_exists(cals_fn)) return 1;
-
   const char* program = shift(argc, argv);
   // fprintf(stderr, "%s\n", program);
   int f_help = 0;
   int f_refresh = 0;
+  int f_reset = 0;
   struct {
     int set;
     const char* url;
@@ -707,6 +734,8 @@ int main(int argc, char **argv) {
       f_del.set = 1;
     } else if (strcmp(arg, "--refresh") == 0 || strcmp(arg, "-r") == 0) {
       f_refresh = 1;
+    } else if (strcmp(arg, "--reset") == 0) {
+      f_reset = 1;
     } else {
       LOG_ERROR("Unknown flag %s", arg);
       return 1;
@@ -723,8 +752,36 @@ int main(int argc, char **argv) {
     fprintf(stdout, "\t--refresh  -r        Refreshes all the calendars.\n");
     fprintf(stdout, "\t--add      -a <url>  Adds <url> to the list of calendars.\n");
     fprintf(stdout, "\t--delete   -d <url>  Deletes <url> from the list of calendars.\n");
+    fprintf(stdout, "\t--reset              Resets the application. You will lose all stored calendars.\n");
     return 0;
   }
+
+  if (f_reset) {
+    LOG_WARN("Resetting. You will lose all stored calendars. Are you sure? [Y/N]");
+    int brk = 0;
+    while(!brk) {
+      char choice = getc(stdin);
+      switch(choice) {
+        case 'y':
+        case 'Y':
+          if(reset(urls_fn, cals_fn)) return 1;
+          brk = 1;
+          break;
+        case 'n':
+        case 'N':
+          brk = 1;
+          break;
+        default:
+          // trailing \n
+          getc(stdin);
+          LOG_ERROR("Invalid choice, type 'Y' or 'N'.");
+          break;
+      }
+    }
+  }
+
+  if(create_file_if_not_exists(urls_fn)) return 1;
+  if(create_file_if_not_exists(cals_fn)) return 1;
 
   if (f_add.set) {
     slice_t url = { (char*)f_add.url, strlen(f_add.url) };

@@ -26,7 +26,7 @@ This application uses the [nob](https://github.com/tsoding/nob.h) build system.
     Linux:
 
     ```console
-    $ gcc nob.c -o nob
+    $ cc nob.c -o nob
     ```
 
 2. Build
@@ -74,3 +74,5 @@ $ today table
     - `delete <url>`: deletes a url from the saved ones.
 
     - `refresh`: refreshes the calendars using the urls saved with the `add` flag
+
+    - `reset`: Remove all application files. You will lose all saved calendars.
